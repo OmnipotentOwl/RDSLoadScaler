@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Version 1.1.0  -->
+<RDSScale>
+  <Azure>
+    <!--Settings required to authenticate to Azure subscription -->
+    <Variable Name="AADTenantId" Value="My AAD tenant ID GUID"/>
+    <Variable Name="AADApplicationId" Value="My AAD application ID GUID"/>
+    <Variable Name="AADAppCertThumbprint" Value="My thumbprint of the cert added to the AAD Service Principal"/>
+    <Variable Name="AADServicePrincipalSecret" Value="My AAD Application Secret"/>
+    <!--Azure subscription name -->
+    <Variable Name="CurrentAzureSubscriptionName" Value="Subscription Name"/>
+    <!--Resource Group Name -->
+    <Variable Name="ResourceGroupName" Value="Resource Group Name"/>
+  </Azure>
+  <RDSScaleSettings>
+    <!-- Defines a connection broker server-->
+    <Variable Name="ConnectionBrokerFQDN" Value=""/>
+    <!-- Defines the max pool capacity before increasing capacity -->
+    <Variable Name="MaxCapacity" Value="0.80"/>
+    <!-- Defines the min pool capacity before decreasing capacity -->
+    <Variable Name="MinCapacity" Value="0.40"/>
+    <!-- Time difference between local time and UTC, in hours -->
+    <Variable Name="TimeDifferenceInHours" Value="-7" />
+    <!-- Maximum number of sessions per CPU threshold used to determine when a new RDSH server needs to be started -->
+    <Variable Name="SessionThresholdPerCPU" Value="3"/>
+    <!-- Minimum number of RDSH servers to keep running during off-peak usage time -->
+    <Variable Name="MinimumNumberOfRDSH" Value="2"/>
+    <!--Number of seconds to wait before forcing users to logoff. If 0, don't force users to logoff -->
+    <Variable Name="LimitSecondsToForceLogOffUser" Value="5"/>
+    <!--Message title sent to a user before forcing logoff -->
+    <Variable Name="LogOffMessageTitle" Value="System Scaling Underway"/>
+    <!--Message body to sent to a user before forcing logoff -->
+    <Variable Name="LogOffMessageBody" Value="Please save your work and logoff!"/>
+  </RDSScaleSettings>
+</RDSScale>
