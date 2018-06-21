@@ -3,9 +3,7 @@
 This is a script for automatically scaling Remote Desktop Services (RDS) in Micrsoft Azure
 
 .Description
-This script will automatically start/stop remote desktop (RD) session host VMs based on the number of user sessions and peak/off-peak time period specified in the configuration file.
-During the peak hours, the script will start necessary session hosts in the session collection to meet the demands of users.
-During the off-peak hours, the script will shutdown the session hosts and only keep the minimum number of session hosts.
+This script will automatically start/stop remote desktop (RD) session host VMs based on the number of user sessions and utilization boundaries in the configuration file.
 You can schedule the script to run at a certain time interval on the RD Connection Broker server in your RDS deployment in Azure.
 #>
 <#
@@ -68,10 +66,13 @@ Function Write-UsageLog
         [string]$collectionName,
         [int]$corecount,
         [int]$vmcount,
+        [int]$sessions,
+        [int]$seats,
+        [string]$utilization,
         [string]$logfilename=$rdsusagelog
     )
     $time=get-date
-    Add-Content $logfilename -value ("{0}, {1}, {2}, {3}" -f $time, $collectionName, $corecount, $vmcount)
+    Add-Content $logfilename -value ("{0}, {1}, {2}, {3}, {4}, {5}, {6}" -f $time, $collectionName, $corecount, $vmcount, $sessions, $seats, $utilization)
 }
 
 <#
@@ -162,11 +163,19 @@ if([string]::IsNullOrEmpty($ConnectionBrokerFQDN)){
     }
 }
 
-
 if($AzureHosted)
 {
     #Load Azure ps module
     Import-Module -Name AzureRM
+
+    #To use certificate based authentication for service principal, please uncomment the following line
+    #Add-AzureRmAccount -ServicePrincipal -CertificateThumbprint $AADAppCertThumbprint -ApplicationId $AADApplicationId -TenantId $AADTenantId
+
+    #The the following three lines is to use password/secret based authentication for service principal, to use certificate based authentication, please comment those lines, and uncomment the above line
+    $secpasswd = ConvertTo-SecureString $AADServicePrincipalSecret -AsPlainText -Force
+    $appcreds = New-Object System.Management.Automation.PSCredential ($AADApplicationId, $secpasswd)
+
+    Add-AzureRmAccount -ServicePrincipal -Credential $appcreds -TenantId $AADTenantId
 
     #select the current Azure Subscription specified in the config
     Select-AzureRmSubscription -SubscriptionName $CurrentAzureSubscriptionName
@@ -248,6 +257,17 @@ Function Drain-RDSHServer{
     #check the session count before shutting down the VM
     if($existingSession -eq 0 -and $AzureHosted)
     {
+        #Get Azure Virtual Machine
+        try
+        {
+            $vm = Get-AzureRmVM -ResourceGroupName $ResourceGroupName | Where-Object {$_.Tags.Values -like "*RDSH*" -and $serverName.ToLower().Contains($_.Name.ToLower()+".") -eq $true} -ErrorAction Stop
+        }
+        catch
+        {
+            Write-Log 1 "Failed to retrieve VM information for resource group: $ResourceGroupName from Azure with error: $($_.exception.message)" "Error"
+            Exit 1
+        }
+        
         #shutdown the Azure VM
         try
         {
@@ -270,7 +290,54 @@ Function ScaleOut-RDSHServer{
     Write-Log 1 "Scaling out session host farm" "Info"
     If($AzureHosted)
     {
-        #AzureOption
+        $IsVmRunning = $false
+        #Get Azure Virtual Machine
+        try
+        {
+            $vm = Get-AzureRmVM -ResourceGroupName $ResourceGroupName -Status| Where-Object {$_.Tags.Values -like "*RDSH*" -and $serverName.ToLower().Contains($_.Name.ToLower()+".") -eq $true} -ErrorAction Stop
+        }
+        catch
+        {
+            Write-Log 1 "ScaleOut-VM Action: Failed to retrieve VM information for resource group: $ResourceGroupName from Azure with error: $($_.exception.message)" "Error"
+            Exit 1
+        }
+        if($vm.PowerState.Contains("running"))
+        {
+            $IsVmRunning = $true
+        }
+        if($IsVmRunning)
+        {
+            Set-RDSessionHost -ConnectionBroker $connectionBroker -SessionHost $serverName -NewConnectionAllowed Yes
+        }
+        else
+        {
+            #start the azure VM
+            try
+            {
+                Write-Log 1 "Starting Azure VM: $($vm.Name) and waiting for it to start up ..." "Info"
+                Start-AzureRmVM -ResourceGroupName $ResourceGroupName -Name $vm.Name -ErrorAction Stop
+            }
+            catch
+            {
+                Write-Log 1 "Failed to start Azure VM: $($vm.Name) with error: $($_.exception.message)" "Error"
+                Exit 1
+            }
+            #wait for the VM to start
+            $IsVMStarted=$false
+            while(!$IsVMStarted)
+            {
+                $VMDetails = Get-AzureRmVM -ResourceGroupName $ResourceGroupName -Name $vm.Name -Status -ErrorAction Stop
+                if($VMDetails.PowerState.Contains("running"))
+                {
+                    $IsVMStarted = $true
+                }
+                #wait for 15 seconds
+                Start-Sleep -Seconds 15
+            }
+            #wait for server to be fully started before allowing users on the system.
+            Start-Sleep -Seconds 120
+            Set-RDSessionHost -ConnectionBroker $connectionBroker -SessionHost $serverName -NewConnectionAllowed Yes
+        }
     }
     else
     {
@@ -376,6 +443,8 @@ foreach($collection in $Collections)
     }
     #check the number of running session hosts
     $numberOfRunningHost=0
+    #total of running cores
+    $totalRunningCores=0
     $RDPoolStatus = @()
     foreach ($sessionHost in $RDSessionHost)
     {
@@ -386,7 +455,7 @@ foreach($collection in $Collections)
             #Get Azure Virtual Machines
             try
             {
-                $VMs = Get-AzureRmVM -ResourceGroupName $ResourceGroupName -ErrorAction Stop
+                $VMs = Get-AzureRmVM -ResourceGroupName $ResourceGroupName | Where-Object {$_.Tags.Values -like "*RDSH*"} -ErrorAction Stop
             }
             catch
             {
@@ -410,7 +479,9 @@ foreach($collection in $Collections)
                     }
                     if($IsVmRunning -eq $true)
                     {
-                        #
+                        $coresAvailable=Get-AzureRmVMSize -ResourceGroupName $ResourceGroupName -VMName $vm.Name | where Name -eq $vm.HardwareProfile.VmSize
+                        $numberOfRunningHost=$numberOfRunningHost+1
+                        $totalRunningCores=$totalRunningCores+$coresAvailable.NumberOfCores
                     }
                     break # break out of the inner foreach loop once a match is found and checked
                 }
@@ -442,9 +513,11 @@ foreach($collection in $Collections)
         $RDPoolStatus += $RDFarmStatus
     }
 
-
     write-host "Current number of running hosts: " $numberOfRunningHost
     write-log 1 "Current number of running hosts: $numberOfRunningHost" "Info"
+    $SessionCount = ($CollectionUserSessions|Where-Object {$_.CollectionName -eq $collection.CollectionName}|Select-Object CollectionName).Count
+    $PoolCapacity = ($RDPoolStatus|Where-Object {$_.Available -eq "Yes"}|Measure-Object -Property MaxCapacity -Sum).Sum
+    $PoolUtilization = "{0:P}" -f($($($RDPoolStatus|Measure-Object -Property TotalUsers -Sum).Sum)/$($($RDPoolStatus|Where-Object {$_.Available -eq "Yes"}|Measure-Object -Property MaxCapacity -Sum).Sum))
     if($numberOfRunningHost -lt $MinimumNumberOfRDSH)
     {
         #Shouldnt need this
@@ -452,10 +525,8 @@ foreach($collection in $Collections)
     else
     {
         #check if the available capacity meets the number of sessions or not
-        write-log 1 "Current total number of user sessions: $($($CollectionUserSessions|Where-Object {$_.CollectionName -eq $collection.CollectionName}|Select-Object CollectionName).Count)" "Info"
-
-        $PoolUtilization = "{0:P}" -f($($($RDPoolStatus|Measure-Object -Property TotalUsers -Sum).Sum)/$($($RDPoolStatus|Where-Object {$_.Available -eq "Yes"}|Measure-Object -Property MaxCapacity -Sum).Sum))
-        write-log 1 "Pool Capacity: $($($RDPoolStatus|Where-Object {$_.Available -eq "Yes"}|Measure-Object -Property MaxCapacity -Sum).Sum) Pool Users: $($($RDPoolStatus|Measure-Object -Property TotalUsers -Sum).Sum) Pool Utilization: $PoolUtilization" "Info"
+        write-log 1 "Current total number of user sessions: $SessionCount" "Info"
+        write-log 1 "Pool Capacity: $PoolCapacity Pool Users: $($($RDPoolStatus|Measure-Object -Property TotalUsers -Sum).Sum) Pool Utilization: $PoolUtilization" "Info"
 
         If($PoolUtilization -lt $CapacityFloor -and $($RDPoolStatus|Where-Object {$_.Available -eq "Yes"}|Measure-Object -Property RDSH).Count -gt $MinimumNumberOfRDSH)
         {
@@ -468,6 +539,7 @@ foreach($collection in $Collections)
                 #Write-Host "Scaling down pool host $($SelectedServer.RDSH)"
                 Write-Log 1 "Scaling down pool host $($SelectedServer.RDSH)" "Info"
                 Drain-RDSHServer -collectionName $collection.CollectionName -connectionBroker $ConnectionBrokerFQDN -serverName $SelectedServer.RDSH
+                $SelectedServer.Available = "No"
             }
         }
 
@@ -482,9 +554,15 @@ foreach($collection in $Collections)
                 #Write-Host "Scaling up pool host $($SelectedServer.RDSH)"
                 Write-Log 1 "Scaling up pool host $($SelectedServer.RDSH)" "Info"
                 ScaleOut-RDSHServer -collectionName $collection.CollectionName -connectionBroker $ConnectionBrokerFQDN -serverName $SelectedServer.RDSH
+                $SelectedServer.Available = "Yes"
             }
         }
+
     }
+    $PoolCapacity = ($RDPoolStatus|Where-Object {$_.Available -eq "Yes"}|Measure-Object -Property MaxCapacity -Sum).Sum
+    $PoolUtilization = "{0:P}" -f($($($RDPoolStatus|Measure-Object -Property TotalUsers -Sum).Sum)/$($($RDPoolStatus|Where-Object {$_.Available -eq "Yes"}|Measure-Object -Property MaxCapacity -Sum).Sum))
+    #write to the usage log
+    Write-UsageLog $collection.CollectionName $totalRunningCores $numberOfRunningHost $SessionCount $PoolCapacity $PoolUtilization
 }
 
 Write-Log 3 "End RDS Scale Optimization." "Info"
