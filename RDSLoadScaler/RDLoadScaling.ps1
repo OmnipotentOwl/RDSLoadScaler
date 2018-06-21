@@ -172,10 +172,20 @@ if($AzureHosted)
     #Add-AzureRmAccount -ServicePrincipal -CertificateThumbprint $AADAppCertThumbprint -ApplicationId $AADApplicationId -TenantId $AADTenantId
 
     #The the following three lines is to use password/secret based authentication for service principal, to use certificate based authentication, please comment those lines, and uncomment the above line
-    $secpasswd = ConvertTo-SecureString $AADServicePrincipalSecret -AsPlainText -Force
-    $appcreds = New-Object System.Management.Automation.PSCredential ($AADApplicationId, $secpasswd)
+    #$secpasswd = ConvertTo-SecureString $AADServicePrincipalSecret -AsPlainText -Force
+    #$appcreds = New-Object System.Management.Automation.PSCredential ($AADApplicationId, $secpasswd)
 
-    Add-AzureRmAccount -ServicePrincipal -Credential $appcreds -TenantId $AADTenantId
+    #Add-AzureRmAccount -ServicePrincipal -Credential $appcreds -TenantId $AADTenantId
+
+    #To use Azure VM Managed Service Identity please uncommend the following line. Please ensure you have setup the proper permissions before enabling this functionality.
+    try
+    {
+        Add-AzureRmAccount -identity
+    }
+    catch
+    {
+        Write-Host "Azure VM MSI token error, please check your azure vm setup."
+    }
 
     #select the current Azure Subscription specified in the config
     Select-AzureRmSubscription -SubscriptionName $CurrentAzureSubscriptionName
