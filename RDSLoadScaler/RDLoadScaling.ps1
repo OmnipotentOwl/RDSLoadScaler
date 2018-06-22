@@ -130,7 +130,7 @@ $Variable.RDSScale.Azure | ForEach-Object {$_.Variable} | Where-Object {$_.Name 
 $Variable.RDSScale.RDSScaleSettings | ForEach-Object {$_.Variable} | Where-Object {$_.Name -ne $null} | ForEach-Object {Set-ScriptVariable -Name $_.Name -Value $_.Value}
 $CapacityTop = "{0:P}" -f([double]$MaxCapacity)
 $CapacityFloor = "{0:P}" -f([double]$MinCapacity)
-$AzureHosted = $false
+if($OnAzure -eq 1){$AzureHosted = $true}else{$AzureHosted = $false}
 
 #Load RDS ps Module
 Import-Module RemoteDesktop
@@ -187,7 +187,7 @@ if($AzureHosted)
         Write-Host "Azure VM MSI token error, please check your azure vm setup."
     }
 
-    #select the current Azure Subscription specified in the config
+    #select the current Azure Subscription specified in the config if not using Azure VM MSI auth option.
     Select-AzureRmSubscription -SubscriptionName $CurrentAzureSubscriptionName
 }
 
@@ -525,12 +525,25 @@ foreach($collection in $Collections)
 
     write-host "Current number of running hosts: " $numberOfRunningHost
     write-log 1 "Current number of running hosts: $numberOfRunningHost" "Info"
-    $SessionCount = ($CollectionUserSessions|Where-Object {$_.CollectionName -eq $collection.CollectionName}|Select-Object CollectionName).Count
+    $SessionCount = ($CollectionUserSessions|Measure-Object).Count
     $PoolCapacity = ($RDPoolStatus|Where-Object {$_.Available -eq "Yes"}|Measure-Object -Property MaxCapacity -Sum).Sum
     $PoolUtilization = "{0:P}" -f($($($RDPoolStatus|Measure-Object -Property TotalUsers -Sum).Sum)/$($($RDPoolStatus|Where-Object {$_.Available -eq "Yes"}|Measure-Object -Property MaxCapacity -Sum).Sum))
     if($numberOfRunningHost -lt $MinimumNumberOfRDSH)
     {
         #Shouldnt need this
+        Write-Log 1 "Pool is below minimum requirements. Adding capacity immediately" "Warning"
+        $SelectedServer =($RDPoolStatus |Where-Object {$_.Available -ne "Yes"}|sort -Property Priority -Descending|select -First 1)
+        if($SelectedServer -ne $null)
+        {
+            Write-Log 1 "Scaling up pool host $($SelectedServer.RDSH)" "Info"
+            ScaleOut-RDSHServer -collectionName $collection.CollectionName -connectionBroker $ConnectionBrokerFQDN -serverName $SelectedServer.RDSH
+            $SelectedServer.Available = "Yes"
+        }
+        else
+        {
+            Write-Log 1 "ALERT: Insufficient standby capacity available! Please provision more session hosts." "Error"
+        }
+        
     }
     else
     {
@@ -542,7 +555,7 @@ foreach($collection in $Collections)
         {
             #Write-Host "Pool is overprovisioned, Reducing capacity"
             Write-log 1 "Pool is overprovisioned, Reducing capacity.." "Info"
-            $SelectedServer =($RDPoolStatus |Where-Object {$_.Available -eq "Yes"}|sort -Property Priority)[0]
+            $SelectedServer =($RDPoolStatus |Where-Object {$_.Available -eq "Yes"}|Sort-Object -Property Priority|select -First 1)
             $ScaleTest = Test-RDPoolSize -pool $RDPoolStatus -scale Down -member $SelectedServer
             if($ScaleTest)
             {
@@ -557,14 +570,21 @@ foreach($collection in $Collections)
         {
             Write-Host "Pool is unprovisioned, Increasing capacity"
             Write-log 1 "Pool is unprovisioned, Increasing capacity.." "Info"
-            $SelectedServer =($RDPoolStatus |Where-Object {$_.Available -ne "Yes"}|sort -Property Priority -Descending)[0]
-            $ScaleTest = Test-RDPoolSize -pool $RDPoolStatus -scale Up -member $SelectedServer
-            if($ScaleTest)
+            $SelectedServer =($RDPoolStatus |Where-Object {$_.Available -ne "Yes"}|sort -Property Priority -Descending|select -First 1)
+            if($SelectedServer -ne $null)
             {
-                #Write-Host "Scaling up pool host $($SelectedServer.RDSH)"
-                Write-Log 1 "Scaling up pool host $($SelectedServer.RDSH)" "Info"
-                ScaleOut-RDSHServer -collectionName $collection.CollectionName -connectionBroker $ConnectionBrokerFQDN -serverName $SelectedServer.RDSH
-                $SelectedServer.Available = "Yes"
+                $ScaleTest = Test-RDPoolSize -pool $RDPoolStatus -scale Up -member $SelectedServer
+                if($ScaleTest)
+                {
+                    #Write-Host "Scaling up pool host $($SelectedServer.RDSH)"
+                    Write-Log 1 "Scaling up pool host $($SelectedServer.RDSH)" "Info"
+                    ScaleOut-RDSHServer -collectionName $collection.CollectionName -connectionBroker $ConnectionBrokerFQDN -serverName $SelectedServer.RDSH
+                    $SelectedServer.Available = "Yes"
+                }
+            }
+            else
+            {
+                Write-Log 1 "ALERT: Insufficient standby capacity available! Please provision more session hosts." "Error"
             }
         }
 
