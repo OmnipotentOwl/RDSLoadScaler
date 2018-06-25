@@ -199,6 +199,8 @@ Function Drain-RDSHServer{
     )
     Write-Log 1 "Counting the current sessions on the host..." "Info"
     $existingSession=0
+    $ts = [timespan]::fromseconds($LimitSecondsToForceLogOffUser)
+    $alertTime = "$($ts.minutes) Minutes"
     Set-RDSessionHost -ConnectionBroker $connectionBroker -SessionHost $serverName -NewConnectionAllowed NotUntilReboot
     $Users = Get-RDUserSession -ConnectionBroker $connectionBroker -CollectionName @($collectionName)|Where-Object {$_.ServerName -eq $serverName}
     foreach($user in $Users){
@@ -221,7 +223,7 @@ Function Drain-RDSHServer{
             #send notification
             try
             {
-                Send-RDUserMessage -HostServer $user.HostServer -UnifiedSessionID $user.UnifiedSessionId -MessageTitle $LogOffMessageTitle -MessageBody "($LogOffMessageBody) You will logged off in $($LimitSecondsToForceLogOffUser) seconds." -ErrorAction Stop
+                Send-RDUserMessage -HostServer $user.HostServer -UnifiedSessionID $user.UnifiedSessionId -MessageTitle $LogOffMessageTitle -MessageBody "($LogOffMessageBody) You will logged off in $($alertTime)." -ErrorAction Stop
                 Write-Host "Message User"
             }
             catch
@@ -281,7 +283,7 @@ Function Drain-RDSHServer{
         #shutdown the Azure VM
         try
         {
-            Write-Log 1 "Stopping Azure VM: $($vm.Name) and waiting for it to start up ..." "Info"
+            Write-Log 1 "Stopping Azure VM: $($vm.Name) and waiting for it to shutdown..." "Info"
             Stop-AzureRmVM -ResourceGroupName $ResourceGroupName -Name $vm.Name -Force -ErrorAction Stop
         }
         catch
